@@ -1,0 +1,92 @@
+name: CI/CD - Validación y Contenedor Docker
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  validar-y-probar:
+    name: Compilación y Pruebas Automatizadas (.NET 10)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Obtener código fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar SDK de .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restaurar dependencias
+        run: dotnet restore ExamenT3.sln
+
+      - name: Compilar solución en Release
+        run: dotnet build ExamenT3.sln --configuration Release --no-restore
+
+      - name: Ejecutar pruebas automatizadas y recolectar cobertura
+        run: >
+          dotnet test ExamenT3.sln
+          --configuration Release
+          --no-build
+          --verbosity normal
+          --logger "trx;LogFileName=resultados-pruebas.trx"
+          --collect:"XPlat Code Coverage"
+          --results-directory ./TestResults
+
+      - name: Publicar evidencias de ejecución de pruebas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencias-pruebas-net10
+          path: ./TestResults
+
+  construir-y-verificar-docker:
+    name: Construcción y Ejecución en Contenedor Docker
+    needs: validar-y-probar
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Obtener código fuente
+        uses: actions/checkout@v4
+
+      - name: Construir imagen Docker de la API
+        run: docker build -t innovatec-academico-api:${{ github.sha }} -t innovatec-academico-api:latest .
+
+      - name: Ejecutar contenedor Docker
+        run: |
+          docker run -d --name innovatec-api -p 8080:8080 innovatec-academico-api:latest
+          echo "Esperando disponibilidad del servicio en el contenedor..."
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:8080/health; then
+              echo ""
+              echo "Contenedor saludable."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "El contenedor no respondió a tiempo."
+          exit 1
+
+      - name: Validar endpoints funcionales dentro del contenedor
+        run: |
+          echo "Verificando endpoint raíz:"
+          curl -fsS http://localhost:8080/
+          echo ""
+          echo "Verificando listado de estudiantes:"
+          curl -fsS http://localhost:8080/api/estudiantes
+          echo ""
+          echo "Registrando nuevo estudiante desde el contenedor:"
+          curl -fsS -X POST http://localhost:8080/api/estudiantes \
+            -H "Content-Type: application/json" \
+            -d '{"codigo":"EST-CI-001","nombreCompleto":"Estudiante CI","correo":"ci@innovatec.edu.pe"}'
+          echo ""
+
+      - name: Mostrar logs y limpiar contenedor
+        if: always()
+        run: |
+          docker logs innovatec-api || true
+          docker rm -f innovatec-api || true
